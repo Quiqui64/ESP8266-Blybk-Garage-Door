@@ -1,0 +1,187 @@
+// Ver 1.8 25 Nov 2017, Fixed issue could not stop door suck alarm
+// Notes for MobeMCU ESP8266
+//    On every boot/reset/wakeup,
+//    GPIO15 MUST keep LOW, GPIO2 MUST keep HIGH.
+//    GPIO0 HIGH ->RUN MODE, LOW->FLASH MODE.
+//    When you need to use the sleep mode, GPIO16 and RST should be connected, and GPIO16 will output LOW to reset the system at the time of wakeup.
+// Notes for Garage Door command signal is 24V and 30mA
+
+#define BLYNK_PRINT Serial    // Comment this out to disable prints and save space
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <SimpleTimer.h>
+#include <ESP8266mDNS.h> // Added for OTA
+#include <WiFiUdp.h> // Added for OTA
+#include <ArduinoOTA.h> // Added for OTA
+// added to control RF power
+extern "C" {
+#include "user_interface.h"
+}
+
+// You should get Auth Token in the Blynk App.
+// Go to the Project Settings (nut icon).
+char auth[] = "??????????????????????????????????";
+SimpleTimer timer;
+
+// Your WiFi credentials.
+// Set password to "" for open networks.
+char ssid[] = "????";
+char pass[] = "???????";
+// door sensor and control
+const byte DoorOpenSwitch = 5; //GPIO5 Pin D1
+const byte DoorCloseSwitch = 4; //GPIO4 Pin D2
+byte oldOpenSwitchState = HIGH;  // assume switch open because of pull-up resistor
+byte oldCloseSwitchState = HIGH;  // assume switch open because of pull-up resistor
+unsigned long notificationTime; // amount of notification time delay in millis
+byte slider1 = 5; // rembers the slider value for how ofter door open notifiacation goes out
+int alarm = 1; // alarm on/off
+String LCDline1 = "Garage Door is"; // used to send text to APP LCD
+String LCDline2; // used to send text to APP LCD 
+unsigned long previousMillis = millis();
+bool firstTime = false;
+
+void setup()
+{
+  system_phy_set_max_tpw(0); // full power here . 1 -82 in 0.25dB steps. - See more at: http://www.esp8266.com/viewtopic.php?f=8&t=10171#sthash.TZYJvuqa.dpuf
+  Serial.begin(9600);
+  Blynk.begin(auth, ssid, pass);
+  Blynk.notify("Device started"); // Notify immediately on startup
+  pinMode(DoorOpenSwitch,INPUT_PULLUP); // Pushbutton
+  pinMode(DoorCloseSwitch,INPUT_PULLUP); // Pushbutton
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266);
+
+  // Hostname defaults to esp8266-[ChipID]
+  ArduinoOTA.setHostname("GarageDoor");
+
+  // No authentication by default
+  // ArduinoOTA.setPassword((const char *)"123");
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("Start");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+  ArduinoOTA.begin();
+  Serial.println("Ready"); // Added for OTA
+  Serial.print("IP address: "); // Added for OTA
+  Serial.println(WiFi.localIP()); // Added for OTA
+}
+
+void loop()
+{
+  doorStatus();
+  Blynk.run();
+  ArduinoOTA.handle();
+}
+
+// Keep this flag not to re-sync on every reconnection
+bool isFirstConnect = true;
+// This function will run every time Blynk connection is established
+BLYNK_CONNECTED() {
+  if (isFirstConnect) {
+    Blynk.syncAll();
+    isFirstConnect = false;
+  }
+}
+
+void doorStuck25Sec()
+{
+         if(firstTime == false)
+         {
+          unsigned long currentMillis = millis();
+         if(currentMillis - previousMillis > 25000L)// sends alarm depends on the value of slider
+           {
+             previousMillis = currentMillis; // get ready for next notificationTime  
+             LCDline2 = "Stuck";
+             firstTime = true;
+             if(alarm == 1)
+               {
+                 Blynk.notify("Door Stuck"); // Notify
+               }
+           }     
+         }      
+}
+
+void doorStuck5Min()
+{    
+         unsigned long currentMillis = millis();
+         if((currentMillis - previousMillis > 300000L) && (alarm == 1))// sends alarm every five minutes
+           {
+             previousMillis = currentMillis; // get ready for next notificationTime  
+             Blynk.notify("Door Stuck"); // Notify
+           }
+}
+void doorStatus() //This code looks for changes, and only displays something when the switch changes.
+{
+  byte openSwitchState = digitalRead (DoorOpenSwitch); // see if switch is open or closed
+  byte closeSwitchState = digitalRead (DoorCloseSwitch); // see if switch is open or closed
+      if (openSwitchState != oldOpenSwitchState || closeSwitchState != oldCloseSwitchState)// has it changed since last time?
+      {
+         oldOpenSwitchState = openSwitchState;  // remember for next time
+         oldCloseSwitchState = closeSwitchState;  // remember for next time 
+         if (closeSwitchState == LOW && openSwitchState == HIGH)
+         {
+           LCDline2 = "Closed";
+         }  // end if closeSwitchState is LOW
+         else if (openSwitchState == LOW && closeSwitchState == HIGH)
+         {
+           LCDline2 = "Open";
+           previousMillis = millis(); // starts the mills fresh for first time run
+         }  // end if openSwitchState is LOW
+         else
+         { 
+           LCDline2 = "Moving";
+           previousMillis = millis(); // starts the mills fresh for first time run
+           firstTime = false; 
+         }  // end if openSwitchState is HIGH
+      } 
+     if((openSwitchState == LOW) && (closeSwitchState == HIGH) && (alarm == 1) ) // checks to see if door is open and alrm is enabled
+       { 
+         notificationTime = slider1 * 60000; // Convert minutes to millisecounds 
+         unsigned long currentMillis = millis();
+         if(currentMillis - previousMillis > notificationTime)
+           {
+             previousMillis = currentMillis; // get ready for next notificationTime  
+             Blynk.notify("Door Open"); // Notify
+           }
+       }      
+    if(openSwitchState == closeSwitchState) // checks to see if door is stuck
+       {  
+         doorStuck25Sec();
+         doorStuck5Min();
+       }
+}
+
+// This function will be called every time
+// when App writes value to Virtual Pin 2
+BLYNK_WRITE(V3) // Get Value of V3
+{
+  alarm = param.asInt(); // make it a interger  
+}
+BLYNK_WRITE(V2) // Get Value of V2
+{
+   slider1 = param.asInt(); // make it a interger 
+}
+BLYNK_READ(V5) // Widget in the app READs Virtal Pin V5 with the certain frequency
+{
+  // This command writes to Virtual Pin V5
+  Blynk.virtualWrite(5, LCDline1);
+}
+BLYNK_READ(V6) // Widget in the app READs Virtal Pin V6 with the certain frequency
+{
+  // This command writes to Virtual Pin V6
+  Blynk.virtualWrite(6, LCDline2);
+}
